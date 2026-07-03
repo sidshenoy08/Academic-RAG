@@ -1,4 +1,5 @@
 import os
+
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import chromadb
@@ -6,10 +7,30 @@ from litellm import completion
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from hashlib import sha256
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
 # folder = os.fsencode(os.getenv('DIR_PATH'))
 
 load_dotenv()
+app = FastAPI()
+
+origins = [
+    "http://localhost:3000",
+    "http://localhost:3000/home"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class Prompt(BaseModel):
+    user_question: str
 
 client = chromadb.PersistentClient(path="./db")
 text_embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -102,12 +123,24 @@ def get_source_metadata(sources, collection):
 #
 # print(results)
 
-knowledge_collection = client.get_or_create_collection(name="knowledgeBase")
-metadata_collection = client.get_or_create_collection(name="metadata", embedding_function=None)
-query = input("Please ask a question about UAVs: ")
-results = semantic_search(query, knowledge_collection)
-# source_metadata = get_source_metadata(results, metadata_collection)
-context = "\n".join(results['documents'][0])
-# source_context = "\n".join(source_metadata)
-response = generate_response(query, context)
-print(response)
+# knowledge_collection = client.get_or_create_collection(name="knowledgeBase")
+# # metadata_collection = client.get_or_create_collection(name="metadata", embedding_function=None)
+# query = input("Please ask a question about UAVs: ")
+# results = semantic_search(query, knowledge_collection)
+# # # source_metadata = get_source_metadata(results, metadata_collection)
+# context = "\n".join(results['documents'][0])
+# # # source_context = "\n".join(source_metadata)
+# response = generate_response(query, context)
+# print(response)
+
+
+@app.post("/submit")
+def submit_prompt(prompt: Prompt):
+    # when no file is uploaded
+    knowledge_collection = client.get_or_create_collection(name="knowledgeBase")
+    results = semantic_search(query=prompt.user_question, collection=knowledge_collection)
+    context = "\n".join(results['documents'][0])
+    response = generate_response(query=prompt.user_question, context=context)
+    return {
+        "model_response": response
+    }
