@@ -7,9 +7,11 @@ from litellm import completion
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from hashlib import sha256
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Form, File, UploadFile
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Annotated
+from io import BytesIO
 
 # folder = os.fsencode(os.getenv('DIR_PATH'))
 
@@ -38,12 +40,13 @@ text_embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 gemini_api_key = os.getenv('GEMINI_API_KEY')
 
 
-def extract_text_from_pdf(pdf_file=None):
+def extract_text_from_pdf(pdf_stream):
     all_text = ""
-    reader = PdfReader(f'{os.getenv('DIR_PATH')}/{pdf_file}')
+    reader = PdfReader(pdf_stream)
     for page in reader.pages:
         all_text += page.extract_text() or ""
-    return all_text, reader.metadata
+    process_text_and_store(all_text, reader.metadata)
+    # return all_text, reader.metadata
 
 
 def process_text_and_store(all_text, metadata):
@@ -81,9 +84,9 @@ def process_text_and_store(all_text, metadata):
             ids=[f"{hash_value}_chunk_{i}"],
             embeddings=[embedding.tolist()],
             metadatas=[{"source": hash_value, "chunk_id": i}],
-            documents=[chunk.join(f'Title: {title}')]
+            documents=[f'{chunk}\nTitle: {title}']
         )
-
+    print("File uploaded to knowledge base!")
 
 def semantic_search(query, collection, top_k=5):
     query_embedding = text_embedding_model.encode(query)
@@ -134,13 +137,29 @@ def get_source_metadata(sources, collection):
 # print(response)
 
 
+# @app.post("/submit")
+# def submit_prompt(prompt: Prompt):
+#     # when no file is uploaded
+#     knowledge_collection = client.get_or_create_collection(name="knowledgeBase")
+#     results = semantic_search(query=prompt.user_question, collection=knowledge_collection)
+#     context = "\n".join(results['documents'][0])
+#     response = generate_response(query=prompt.user_question, context=context)
+#     return {
+#         "model_response": response
+#     }
+
 @app.post("/submit")
-def submit_prompt(prompt: Prompt):
-    # when no file is uploaded
+async def submit_prompt(user_question: Annotated[str, Form()], files: list[UploadFile] | None = File(None)):
+    # if files are uploaded
+    if files:
+        for file in files:
+            pdf_bytes = await file.read()
+            pdf_stream = BytesIO(pdf_bytes)
+            extract_text_from_pdf(pdf_stream)
     knowledge_collection = client.get_or_create_collection(name="knowledgeBase")
-    results = semantic_search(query=prompt.user_question, collection=knowledge_collection)
+    results = semantic_search(query=user_question, collection=knowledge_collection)
     context = "\n".join(results['documents'][0])
-    response = generate_response(query=prompt.user_question, context=context)
+    response = generate_response(query=user_question, context=context)
     return {
         "model_response": response
     }
