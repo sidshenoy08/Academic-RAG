@@ -7,11 +7,15 @@ from litellm import completion
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from hashlib import sha256
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, File, UploadFile
-from pydantic import BaseModel
+from fastapi import FastAPI, Form, File, UploadFile, status, HTTPException, Response
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Annotated
+from typing import Annotated, Optional
 from io import BytesIO
+from pymongo import MongoClient
+from pydantic_mongo import PydanticObjectId, AbstractRepository
+from datetime import datetime, timedelta, timezone
+import jwt
 
 # folder = os.fsencode(os.getenv('DIR_PATH'))
 
@@ -34,10 +38,38 @@ app.add_middleware(
 class Prompt(BaseModel):
     user_question: str
 
+
+class User(BaseModel):
+    id: Optional[PydanticObjectId] = None
+    email: str
+    password: str
+    cpassword: str | None = Field(default=None, exclude=True)
+
+class UserRepository(AbstractRepository[User]):
+    class Meta:
+        collection_name = 'users'
+
+
 client = chromadb.PersistentClient(path="./db")
 text_embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 gemini_api_key = os.getenv('GEMINI_API_KEY')
+
+mongo_client = MongoClient(os.getenv('MONGODB_URL'))
+database = mongo_client['academic-rag']
+user_repo = UserRepository(database)
+
+
+def issue_jwt_token(user_id):
+    now = datetime.now(timezone.utc)
+    expire_time = now + timedelta(minutes=60)
+    payload = {
+        'userId': user_id,
+        'iat': int(now.timestamp()),
+        'exp': int(expire_time.timestamp())
+    }
+    token = jwt.encode(payload, os.getenv('JWT_SECRET'), algorithm='HS256')
+    return token
 
 
 def extract_text_from_pdf(pdf_stream):
@@ -147,6 +179,48 @@ def get_source_metadata(sources, collection):
 #     return {
 #         "model_response": response
 #     }
+
+
+@app.post("/register")
+async def register_user(user: User, response: Response):
+    user.password = sha256(user.password.encode('utf-8')).hexdigest()
+    result = user_repo.save(user)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    else:
+        response.status_code = status.HTTP_201_CREATED
+        token = issue_jwt_token(str(result.inserted_id))
+        response.set_cookie(
+            key="session_token",
+            value=token,
+            httponly=True,
+            secure=True,
+            samesite='lax'
+        )
+        print("User has been registered!")
+
+
+@app.post("/login")
+async def login_user(user: User, response: Response):
+    user = user_repo.find_one_by({'email': user.email, 'password': sha256(user.password.encode('utf-8')).hexdigest()})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED
+        )
+    else:
+        response.status_code = status.HTTP_200_OK
+        token = issue_jwt_token(str(user.id))
+        response.set_cookie(
+            key="session_token",
+            value=token,
+            httponly=True,
+            secure=True,
+            samesite='lax'
+        )
+        print("User has been logged in!")
+
 
 @app.post("/submit")
 async def submit_prompt(user_question: Annotated[str, Form()], files: list[UploadFile] | None = File(None)):
