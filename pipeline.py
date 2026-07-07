@@ -7,15 +7,17 @@ from litellm import completion
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from hashlib import sha256
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, File, UploadFile, status, HTTPException, Response
+from fastapi import FastAPI, Form, File, UploadFile, status, HTTPException, Response, Request
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Annotated, Optional
+from typing import Annotated, Optional, List
 from io import BytesIO
 from pymongo import MongoClient
 from pydantic_mongo import PydanticObjectId, AbstractRepository
 from datetime import datetime, timedelta, timezone
 import jwt
+import json
+from bson import ObjectId
 
 # folder = os.fsencode(os.getenv('DIR_PATH'))
 
@@ -45,10 +47,22 @@ class User(BaseModel):
     password: str
     cpassword: str | None = Field(default=None, exclude=True)
 
+class Message(BaseModel):
+    userPrompt: str
+    queryResponse: str
+
+class Chat(BaseModel):
+    id: Optional[PydanticObjectId] = None
+    userId: Optional[PydanticObjectId] = None
+    messages: List[Message]
+
 class UserRepository(AbstractRepository[User]):
     class Meta:
         collection_name = 'users'
 
+class ChatRepository(AbstractRepository[Chat]):
+    class Meta:
+        collection_name = 'chats'
 
 client = chromadb.PersistentClient(path="./db")
 text_embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -58,6 +72,7 @@ gemini_api_key = os.getenv('GEMINI_API_KEY')
 mongo_client = MongoClient(os.getenv('MONGODB_URL'))
 database = mongo_client['academic-rag']
 user_repo = UserRepository(database)
+chat_repo = ChatRepository(database)
 
 
 def issue_jwt_token(user_id):
@@ -197,7 +212,7 @@ async def register_user(user: User, response: Response):
             value=token,
             httponly=True,
             secure=True,
-            samesite='lax'
+            samesite='none'
         )
         print("User has been registered!")
 
@@ -217,7 +232,8 @@ async def login_user(user: User, response: Response):
             value=token,
             httponly=True,
             secure=True,
-            samesite='lax'
+            samesite='none',
+            path='/'
         )
         print("User has been logged in!")
 
@@ -237,3 +253,71 @@ async def submit_prompt(user_question: Annotated[str, Form()], files: list[Uploa
     return {
         "model_response": response
     }
+
+
+@app.post("/save")
+async def save_chat(request: Request, response: Response):
+    session_token = request.cookies.get('session_token')
+    token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
+    user_id = token.get('userId')
+    request_body = await request.body()
+    user_chat = json.loads(request_body.decode('utf-8'))
+    if not user_chat.get('chatId'):
+        message = Message(userPrompt=user_chat.get('userPrompt'), queryResponse=user_chat.get('queryResponse'))
+        chat = Chat(userId=user_id, messages=[message])
+        result = chat_repo.save(chat)
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        else:
+            response.status_code = status.HTTP_201_CREATED
+        print("Current chat has been created!")
+        return {"message": str(result.inserted_id)}
+    else:
+        chats_collection = database['chats']
+        result = chats_collection.update_one(
+            {"_id": ObjectId(user_chat.get('chatId'))},
+            {"$push": {"messages": {"userPrompt": user_chat.get('userPrompt'), "queryResponse": user_chat.get('queryResponse')}}},
+        )
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        else:
+            response.status_code = status.HTTP_201_CREATED
+        print("Current chat has been updated!")
+        return {"message": str(result.upserted_id)}
+
+
+@app.get("/retrieve")
+async def retrieve_chats(request: Request, response: Response):
+    session_token = request.cookies.get('session_token')
+    token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
+    user_id = ObjectId(token.get('userId'))
+    user_chats = list(chat_repo.find_by({"userId": user_id}))
+    if user_chats:
+        response.status_code = status.HTTP_200_OK
+        return {"userChats": user_chats}
+    else:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"userChats": []}
+
+
+@app.post("/delete")
+async def delete_chat(request: Request, response: Response):
+    request_body = await request.body()
+    chat_id = json.loads(request_body.decode('utf-8')).get('chat')
+    result = chat_repo.delete_by_id(ObjectId(chat_id))
+    if result.deleted_count > 0:
+        print("Chat deleted successfully!")
+        response.status_code = status.HTTP_200_OK
+    else:
+        response.status_code = status.HTTP_404_NOT_FOUND
+
+
+@app.post("/logout")
+async def logout_user(request: Request, response: Response):
+    # response.delete_cookie(key="session_token")
+    response.status_code = status.HTTP_200_OK
+    return {"message": "User has been logged out"}
