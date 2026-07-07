@@ -87,18 +87,18 @@ def issue_jwt_token(user_id):
     return token
 
 
-def extract_text_from_pdf(pdf_stream):
+def extract_text_from_pdf(pdf_stream, chunk_size=512, chunk_overlap=50):
     all_text = ""
     reader = PdfReader(pdf_stream)
     for page in reader.pages:
         all_text += page.extract_text() or ""
-    process_text_and_store(all_text, reader.metadata)
+    process_text_and_store(all_text, reader.metadata, chunk_size, chunk_overlap)
     # return all_text, reader.metadata
 
 
-def process_text_and_store(all_text, metadata):
+def process_text_and_store(all_text, metadata, chunk_size, chunk_overlap):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500, chunk_overlap=50, separators=["\n\n", "\n", " ", ""], length_function=len
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap, separators=["\n\n", "\n", " ", ""], length_function=len
     )
 
     hash_value = sha256(all_text.encode('utf-8')).hexdigest()
@@ -239,13 +239,14 @@ async def login_user(user: User, response: Response):
 
 
 @app.post("/submit")
-async def submit_prompt(user_question: Annotated[str, Form()], files: list[UploadFile] | None = File(None)):
+async def submit_prompt(user_question: Annotated[str, Form()], chunk_size: Annotated[int, Form()], chunk_overlap: Annotated[int, Form()], files: list[UploadFile] | None = File(None)):
+    print(f'{chunk_size} {chunk_overlap}')
     # if files are uploaded
     if files:
         for file in files:
             pdf_bytes = await file.read()
             pdf_stream = BytesIO(pdf_bytes)
-            extract_text_from_pdf(pdf_stream)
+            extract_text_from_pdf(pdf_stream, chunk_size, chunk_overlap)
     knowledge_collection = client.get_or_create_collection(name="knowledgeBase")
     results = semantic_search(query=user_question, collection=knowledge_collection)
     context = "\n".join(results['documents'][0])
