@@ -386,7 +386,7 @@ async def analytics(request: Request, response: Response):
                     "totalPrompts": {"$sum": "$total_prompts"}, "totalLikes": {"$sum": "$likes"},
                     "totalDislikes": {"$sum": "$dislikes"}}},
         {"$sort": {"_id": 1}},
-        {"$project": {"month": {"$dateToString": {"format": "%Y-%m", "date": "$_id"}}, "totalPrompts": 1, "totalLikes": 1,
+        {"$project": {"month": {"$dateToString": {"format": "%B-%Y", "date": "$_id"}}, "totalPrompts": 1, "totalLikes": 1,
                       "totalDislikes": 1, "_id": 0}}
     ]
     year_pipeline = [
