@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import json
 from bson import ObjectId
+import motor.motor_asyncio
 
 # folder = os.fsencode(os.getenv('DIR_PATH'))
 
@@ -371,6 +372,39 @@ async def like_response(request: Request, response: Response):
         response.status_code = status.HTTP_200_OK
     else:
         response.status_code = status.HTTP_404_NOT_FOUND
+
+
+@app.get("/analytics")
+async def analytics(request: Request, response: Response):
+    chats_collection = database['chats']
+    session_token = request.cookies.get('session_token')
+    token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
+    user_id = ObjectId(token.get('userId'))
+    month_pipeline = [
+        {"$match": {"userId": user_id}},
+        {"$group": {"_id": {"$dateTrunc": {"date": "$created_at", "unit": "month"}},
+                    "totalPrompts": {"$sum": "$total_prompts"}, "totalLikes": {"$sum": "$likes"},
+                    "totalDislikes": {"$sum": "$dislikes"}}},
+        {"$sort": {"_id": 1}},
+        {"$project": {"month": {"$dateToString": {"format": "%Y-%m", "date": "$_id"}}, "totalPrompts": 1, "totalLikes": 1,
+                      "totalDislikes": 1, "_id": 0}}
+    ]
+    year_pipeline = [
+        {"$match": {"userId": user_id}},
+        {"$group": {"_id": {"$dateTrunc": { "date": "$created_at", "unit": "year" }}, "totalPrompts": { "$sum": "$total_prompts" }, "totalLikes": { "$sum": "$likes" }, "totalDislikes": { "$sum": "$dislikes" }}},
+        {"$sort": {"_id": 1}},
+        {"$project": {"year": { "$dateToString": { "format": "%Y", "date": "$_id" } }, "totalPrompts": 1, "totalLikes": 1,"totalDislikes": 1, "_id": 0}}
+    ]
+    results = chats_collection.aggregate([
+        {"$match": {"userId": user_id}},
+        {"$facet": {
+            "monthStats": month_pipeline,
+            "yearStats": year_pipeline
+        }}
+        ]
+    )
+    chat_metrics = list(results)
+    return {"stats": chat_metrics}
 
 
 @app.post("/delete")
