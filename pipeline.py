@@ -8,7 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from hashlib import sha256
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form, File, UploadFile, status, HTTPException, Response, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AwareDatetime
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Annotated, Optional, List
 from io import BytesIO
@@ -37,6 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class Prompt(BaseModel):
     user_question: str
 
@@ -47,29 +48,43 @@ class User(BaseModel):
     password: str
     cpassword: str | None = Field(default=None, exclude=True)
 
+
 class Message(BaseModel):
     userPrompt: str
     queryResponse: str
+
 
 class Chat(BaseModel):
     id: Optional[PydanticObjectId] = None
     userId: Optional[PydanticObjectId] = None
     messages: List[Message]
+    total_prompts: int = 1
+    likes: int = 0
+    dislikes: int = 0
+    created_at: AwareDatetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    last_updated: AwareDatetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
 
 class UserRepository(AbstractRepository[User]):
     class Meta:
         collection_name = 'users'
 
+
 class ChatRepository(AbstractRepository[Chat]):
     class Meta:
         collection_name = 'chats'
+
 
 client = chromadb.PersistentClient(path="./db")
 text_embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 gemini_api_key = os.getenv('GEMINI_API_KEY')
 
-mongo_client = MongoClient(os.getenv('MONGODB_URL'))
+mongo_client = MongoClient(os.getenv('MONGODB_URL'), tz_aware=True)
 database = mongo_client['academic-rag']
 user_repo = UserRepository(database)
 chat_repo = ChatRepository(database)
@@ -134,6 +149,7 @@ def process_text_and_store(all_text, metadata, chunk_size, chunk_overlap):
             documents=[f'{chunk}\nTitle: {title}']
         )
     print("File uploaded to knowledge base!")
+
 
 def semantic_search(query, collection, top_k=5):
     query_embedding = text_embedding_model.encode(query)
@@ -240,7 +256,6 @@ async def login_user(user: User, response: Response):
 
 @app.post("/submit")
 async def submit_prompt(user_question: Annotated[str, Form()], chunk_size: Annotated[int, Form()], chunk_overlap: Annotated[int, Form()], files: list[UploadFile] | None = File(None)):
-    print(f'{chunk_size} {chunk_overlap}')
     # if files are uploaded
     if files:
         for file in files:
@@ -262,9 +277,10 @@ async def save_chat(request: Request, response: Response):
     token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
     user_id = token.get('userId')
     request_body = await request.body()
-    user_chat = json.loads(request_body.decode('utf-8'))
-    if not user_chat.get('chatId'):
-        message = Message(userPrompt=user_chat.get('userPrompt'), queryResponse=user_chat.get('queryResponse'))
+    request_body_json = json.loads(request_body.decode('utf-8'))
+    # if a new chat has been created by the user
+    if not request_body_json.get('chatId'):
+        message = Message(userPrompt=request_body_json.get('userPrompt'), queryResponse=request_body_json.get('queryResponse'))
         chat = Chat(userId=user_id, messages=[message])
         result = chat_repo.save(chat)
         if not result:
@@ -277,9 +293,21 @@ async def save_chat(request: Request, response: Response):
         return {"message": str(result.inserted_id)}
     else:
         chats_collection = database['chats']
+        current_time = datetime.now(tz=timezone.utc)
         result = chats_collection.update_one(
-            {"_id": ObjectId(user_chat.get('chatId'))},
-            {"$push": {"messages": {"userPrompt": user_chat.get('userPrompt'), "queryResponse": user_chat.get('queryResponse')}}},
+            {"_id": ObjectId(request_body_json.get('chatId'))},
+            {
+                "$push": {
+                    "messages": {"userPrompt": request_body_json.get('userPrompt'), "queryResponse": request_body_json.get('queryResponse')
+                        }
+                    },
+                "$inc": {
+                    "total_prompts": 1
+                },
+                "$set": {
+                    "last_updated": current_time
+                }
+            },
         )
         if not result:
             raise HTTPException(
@@ -303,6 +331,46 @@ async def retrieve_chats(request: Request, response: Response):
     else:
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"userChats": []}
+
+
+@app.post("/like")
+async def like_response(request: Request, response: Response):
+    chats_collection = database['chats']
+    request_body = await request.body()
+    chat_id = json.loads(request_body.decode('utf-8')).get('chat')
+    result = chats_collection.update_one(
+        {"_id": ObjectId(chat_id)},
+        {
+            "$inc": {
+                "likes": 1
+            }
+        }
+    )
+    if result.modified_count > 0:
+        print("Model response was liked!")
+        response.status_code = status.HTTP_200_OK
+    else:
+        response.status_code = status.HTTP_404_NOT_FOUND
+
+
+@app.post("/dislike")
+async def like_response(request: Request, response: Response):
+    chats_collection = database['chats']
+    request_body = await request.body()
+    chat_id = json.loads(request_body.decode('utf-8')).get('chat')
+    result = chats_collection.update_one(
+        {"_id": ObjectId(chat_id)},
+        {
+            "$inc": {
+                "dislikes": 1
+            }
+        }
+    )
+    if result.modified_count > 0:
+        print("Model response was disliked!")
+        response.status_code = status.HTTP_200_OK
+    else:
+        response.status_code = status.HTTP_404_NOT_FOUND
 
 
 @app.post("/delete")
