@@ -7,7 +7,7 @@ from litellm import completion
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from hashlib import sha256
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, File, UploadFile, status, HTTPException, Response, Request
+from fastapi import FastAPI, Form, File, UploadFile, status, HTTPException, Response, Request, Cookie
 from pydantic import BaseModel, Field, AwareDatetime
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Annotated, Optional, List
@@ -18,7 +18,6 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import json
 from bson import ObjectId
-import motor.motor_asyncio
 
 # folder = os.fsencode(os.getenv('DIR_PATH'))
 
@@ -26,8 +25,7 @@ load_dotenv()
 app = FastAPI()
 
 origins = [
-    "http://localhost:3000",
-    "http://localhost:3000/home"
+    "http://localhost:3000"
 ]
 
 app.add_middleware(
@@ -249,8 +247,7 @@ async def login_user(user: User, response: Response):
             value=token,
             httponly=True,
             secure=True,
-            samesite='none',
-            path='/'
+            samesite='none'
         )
         print("User has been logged in!")
 
@@ -273,8 +270,8 @@ async def submit_prompt(user_question: Annotated[str, Form()], chunk_size: Annot
 
 
 @app.post("/save")
-async def save_chat(request: Request, response: Response):
-    session_token = request.cookies.get('session_token')
+async def save_chat(request: Request, response: Response, session_token: Annotated[str | None, Cookie()] = None):
+    # session_token = request.cookies.get('session_token')
     token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
     user_id = token.get('userId')
     request_body = await request.body()
@@ -321,8 +318,9 @@ async def save_chat(request: Request, response: Response):
 
 
 @app.get("/retrieve")
-async def retrieve_chats(request: Request, response: Response):
-    session_token = request.cookies.get('session_token')
+async def retrieve_chats(response: Response, session_token: Annotated[str | None, Cookie()] = None):
+    # print(session_token)
+    # session_token = request.cookies.get('session_token')
     token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
     user_id = ObjectId(token.get('userId'))
     user_chats = list(chat_repo.find_by({"userId": user_id}))
@@ -375,9 +373,9 @@ async def like_response(request: Request, response: Response):
 
 
 @app.get("/analytics")
-async def analytics(request: Request, response: Response):
+async def analytics(request: Request, response: Response, session_token: Annotated[str | None, Cookie()] = None):
     chats_collection = database['chats']
-    session_token = request.cookies.get('session_token')
+    # session_token = request.cookies.get('session_token')
     token = jwt.decode(session_token, os.getenv('JWT_SECRET'), algorithms=['HS256'])
     user_id = ObjectId(token.get('userId'))
     month_pipeline = [
@@ -419,8 +417,19 @@ async def delete_chat(request: Request, response: Response):
         response.status_code = status.HTTP_404_NOT_FOUND
 
 
+@app.get("/check_auth")
+async def check_auth(request: Request, response: Response, session_token: Annotated[str | None, Cookie()] = None):
+    print("Checking if user is authenticated")
+    if session_token is None:
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+    else:
+        response.status_code = status.HTTP_200_OK
+
+
 @app.post("/logout")
 async def logout_user(request: Request, response: Response):
-    # response.delete_cookie(key="session_token")
     response.status_code = status.HTTP_200_OK
+    response.delete_cookie(key="session_token", httponly=True,
+            secure=True,
+            samesite='none')
     return {"message": "User has been logged out"}
